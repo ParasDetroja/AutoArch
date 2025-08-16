@@ -1,0 +1,255 @@
+#include "StructureBuilder.h"
+#include "FloorPlanAnalyzer.h"
+#include "MeshGenerator.h"
+#include "Engine/World.h"
+#include "Engine/StaticMeshActor.h"
+#include "Components/StaticMeshComponent.h"
+#include "Materials/MaterialInterface.h"
+#include "UObject/ConstructorHelpers.h"
+#include "Engine/Engine.h"
+
+UStructureBuilder::UStructureBuilder()
+{
+    // MeshGenerator will be created when needed
+    MeshGenerator = nullptr;
+}
+
+void UStructureBuilder::BuildStructure(UWorld* World, UFloorPlanAnalyzer* Analyzer)
+{
+    if (!World || !Analyzer)
+    {
+        UE_LOG(LogTemp, Error, TEXT("StructureBuilder: Invalid World or Analyzer"));
+        return;
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("StructureBuilder: Starting structure building"));
+
+    // Build in order: floors first, then walls, then ceilings, finally openings
+    BuildFloors(World, Analyzer);
+    BuildWalls(World, Analyzer);
+    BuildCeilings(World, Analyzer);
+    CreateOpenings(World, Analyzer);
+
+    UE_LOG(LogTemp, Log, TEXT("StructureBuilder: Structure building completed"));
+}
+
+void UStructureBuilder::BuildFloors(UWorld* World, UFloorPlanAnalyzer* Analyzer)
+{
+    const TArray<FRoomData>& Rooms = Analyzer->GetRoomData();
+    
+    for (int32 i = 0; i < Rooms.Num(); ++i)
+    {
+        const FRoomData& Room = Rooms[i];
+        
+        // Create floor mesh for this room
+        FString ActorName = FString::Printf(TEXT("Floor_%s"), *Room.RoomName);
+        AActor* FloorActor = CreateMeshActor(World, ActorName);
+        
+        if (FloorActor)
+        {
+            UStaticMeshComponent* MeshComponent = FloorActor->FindComponentByClass<UStaticMeshComponent>();
+            if (MeshComponent)
+            {
+                // Create mesh generator if needed
+                if (!MeshGenerator)
+                {
+                    MeshGenerator = NewObject<UMeshGenerator>(this);
+                }
+                
+                // Generate floor mesh
+                UStaticMesh* FloorMesh = MeshGenerator ? MeshGenerator->GenerateFloorMesh(Room.BoundaryPoints, 0.0f) : nullptr;
+                if (FloorMesh)
+                {
+                    MeshComponent->SetStaticMesh(FloorMesh);
+                    ApplyMaterial(MeshComponent, TEXT("/Game/Materials/M_Floor"));
+                    
+                    // Scale the floor to match room dimensions (convert cm to UE units)
+                    FVector FloorScale = FVector(Room.Dimensions.X / 100.0f, Room.Dimensions.Y / 100.0f, 1.0f);
+                    FloorActor->SetActorScale3D(FloorScale);
+                    
+                    // Position the floor (convert cm to UE units)
+                    FloorActor->SetActorLocation(FVector(Room.Center.X, Room.Center.Y, 0.0f));
+                    
+                    UE_LOG(LogTemp, Warning, TEXT("StructureBuilder: ✓ Created FLOOR for %s at location (%.1f, %.1f, 0) with scale (%.1f, %.1f, 1)"), 
+                           *Room.RoomName, Room.Center.X, Room.Center.Y, FloorScale.X, FloorScale.Y);
+                }
+            }
+        }
+    }
+}
+
+void UStructureBuilder::BuildWalls(UWorld* World, UFloorPlanAnalyzer* Analyzer)
+{
+    const TArray<FVector2D>& WallPoints = Analyzer->GetWallPoints();
+    const TArray<FOpeningData>& Openings = Analyzer->GetOpeningData();
+    
+    if (WallPoints.Num() < 2)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("StructureBuilder: Not enough wall points to build walls"));
+        return;
+    }
+
+    // Group wall points into continuous segments
+    TArray<TArray<FVector2D>> WallSegments;
+    // Simple implementation: treat all points as one segment
+    // In a more sophisticated version, you'd group nearby points into segments
+    WallSegments.Add(WallPoints);
+
+    for (int32 SegmentIndex = 0; SegmentIndex < WallSegments.Num(); ++SegmentIndex)
+    {
+        const TArray<FVector2D>& Segment = WallSegments[SegmentIndex];
+        
+        for (int32 i = 0; i < Segment.Num() - 1; ++i)
+        {
+            FVector2D Start = Segment[i];
+            FVector2D End = Segment[i + 1];
+            
+            // Check if this wall segment intersects with any openings
+            TArray<FOpeningData> SegmentOpenings;
+            for (const FOpeningData& Opening : Openings)
+            {
+                // Simple check: if opening is near this wall segment
+                float DistToStart = FVector2D::Distance(Opening.Position, Start);
+                float DistToEnd = FVector2D::Distance(Opening.Position, End);
+                float SegmentLength = FVector2D::Distance(Start, End);
+                
+                if (DistToStart < 100.0f || DistToEnd < 100.0f || (DistToStart + DistToEnd) < (SegmentLength + 50.0f))
+                {
+                    SegmentOpenings.Add(Opening);
+                }
+            }
+            
+            // Create wall mesh with openings
+            FString ActorName = FString::Printf(TEXT("Wall_Segment_%d_%d"), SegmentIndex, i);
+            AActor* WallActor = CreateMeshActor(World, ActorName);
+            
+            if (WallActor)
+            {
+                // Create mesh generator if needed
+                if (!MeshGenerator)
+                {
+                    MeshGenerator = NewObject<UMeshGenerator>(this);
+                }
+                
+                UStaticMeshComponent* MeshComponent = WallActor->FindComponentByClass<UStaticMeshComponent>();
+                if (MeshComponent && MeshGenerator)
+                {
+                    UStaticMesh* WallMesh = MeshGenerator->GenerateWallMesh(Start, End, WallHeight, WallThickness, SegmentOpenings, DoorHeight, WindowHeight);
+                    if (WallMesh)
+                    {
+                        MeshComponent->SetStaticMesh(WallMesh);
+                        ApplyMaterial(MeshComponent, TEXT("/Game/Materials/M_Wall"));
+                        
+                        // Calculate wall dimensions and position
+                        float WallLength = FVector2D::Distance(Start, End);
+                        FVector2D WallCenter = (Start + End) * 0.5f;
+                        
+                        // Scale the wall to match dimensions (convert cm to UE units)
+                        FVector WallScale = FVector(WallLength / 100.0f, WallThickness / 100.0f, WallHeight / 100.0f);
+                        WallActor->SetActorScale3D(WallScale);
+                        
+                        // Position the wall (convert cm to UE units)
+                        WallActor->SetActorLocation(FVector(WallCenter.X, WallCenter.Y, WallHeight * 0.5f));
+                        
+                        // Rotate wall to align with direction
+                        FVector WallDirection = FVector(End.X - Start.X, End.Y - Start.Y, 0).GetSafeNormal();
+                        FRotator WallRotation = WallDirection.Rotation();
+                        WallActor->SetActorRotation(WallRotation);
+                        
+                        UE_LOG(LogTemp, Warning, TEXT("StructureBuilder: ✓ Created WALL segment %d-%d at (%.1f, %.1f, %.1f) length %.1f height %.1f"), 
+                               SegmentIndex, i, WallCenter.X, WallCenter.Y, WallHeight * 0.5f, WallLength, WallHeight);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void UStructureBuilder::BuildCeilings(UWorld* World, UFloorPlanAnalyzer* Analyzer)
+{
+    const TArray<FRoomData>& Rooms = Analyzer->GetRoomData();
+    
+    for (int32 i = 0; i < Rooms.Num(); ++i)
+    {
+        const FRoomData& Room = Rooms[i];
+        
+        // Create ceiling mesh for this room
+        FString ActorName = FString::Printf(TEXT("Ceiling_%s"), *Room.RoomName);
+        AActor* CeilingActor = CreateMeshActor(World, ActorName);
+        
+        if (CeilingActor)
+        {
+            UStaticMeshComponent* MeshComponent = CeilingActor->FindComponentByClass<UStaticMeshComponent>();
+            if (MeshComponent)
+            {
+                // Create mesh generator if needed
+                if (!MeshGenerator)
+                {
+                    MeshGenerator = NewObject<UMeshGenerator>(this);
+                }
+                
+                // Generate ceiling mesh (same as floor but at different height)
+                UStaticMesh* CeilingMesh = MeshGenerator ? MeshGenerator->GenerateFloorMesh(Room.BoundaryPoints, WallHeight) : nullptr;
+                if (CeilingMesh)
+                {
+                    MeshComponent->SetStaticMesh(CeilingMesh);
+                    ApplyMaterial(MeshComponent, TEXT("/Game/Materials/M_Ceiling"));
+                    
+                    // Scale the ceiling to match room dimensions (convert cm to UE units)
+                    FVector CeilingScale = FVector(Room.Dimensions.X / 100.0f, Room.Dimensions.Y / 100.0f, 1.0f);
+                    CeilingActor->SetActorScale3D(CeilingScale);
+                    
+                    // Position the ceiling at wall height (convert cm to UE units)
+                    CeilingActor->SetActorLocation(FVector(Room.Center.X, Room.Center.Y, WallHeight));
+                    
+                    UE_LOG(LogTemp, Warning, TEXT("StructureBuilder: ✓ Created CEILING for %s at location (%.1f, %.1f, %.1f) with scale (%.1f, %.1f, 1)"), 
+                           *Room.RoomName, Room.Center.X, Room.Center.Y, WallHeight, CeilingScale.X, CeilingScale.Y);
+                }
+            }
+        }
+    }
+}
+
+void UStructureBuilder::CreateOpenings(UWorld* World, UFloorPlanAnalyzer* Analyzer)
+{
+    // Openings are already created as cutouts in walls during wall generation
+    // This function could be used for additional opening-specific actors (like door frames)
+    UE_LOG(LogTemp, Log, TEXT("StructureBuilder: Openings integrated into wall meshes"));
+}
+
+AActor* UStructureBuilder::CreateMeshActor(UWorld* World, const FString& Name)
+{
+    if (!World)
+    {
+        return nullptr;
+    }
+
+    // Create a new static mesh actor
+    AStaticMeshActor* MeshActor = World->SpawnActor<AStaticMeshActor>();
+    if (MeshActor)
+    {
+        MeshActor->SetActorLabel(Name);
+        MeshActor->GetStaticMeshComponent()->SetMobility(EComponentMobility::Static);
+    }
+
+    return MeshActor;
+}
+
+void UStructureBuilder::ApplyMaterial(UStaticMeshComponent* MeshComponent, const FString& MaterialPath)
+{
+    if (!MeshComponent)
+    {
+        return;
+    }
+
+    // Try to load the material
+    UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
+    if (Material)
+    {
+        MeshComponent->SetMaterial(0, Material);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("StructureBuilder: Could not load material at %s"), *MaterialPath);
+    }
+}

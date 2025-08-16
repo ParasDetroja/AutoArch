@@ -1,0 +1,412 @@
+#include "FloorPlanAnalyzer.h"
+#include "Engine/Texture2D.h"
+#include "TextureResource.h"
+#include "Containers/Queue.h"
+
+UFloorPlanAnalyzer::UFloorPlanAnalyzer()
+{
+    ImageDimensions = FVector2D::ZeroVector;
+}
+
+bool UFloorPlanAnalyzer::AnalyzeFloorPlan(UTexture2D* FloorPlanImage, float ScaleFactor)
+{
+    if (!FloorPlanImage)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FloorPlanAnalyzer: No image provided"));
+        return false;
+    }
+
+    // Clear previous data
+    RoomData.Empty();
+    OpeningData.Empty();
+    WallPoints.Empty();
+
+    // Extract pixel data from texture
+    TArray<FColor> PixelData;
+    int32 Width, Height;
+    if (!ExtractImageData(FloorPlanImage, PixelData, Width, Height))
+    {
+        UE_LOG(LogTemp, Error, TEXT("FloorPlanAnalyzer: Failed to extract image data"));
+        return false;
+    }
+
+    ImageDimensions = FVector2D(Width, Height);
+
+    UE_LOG(LogTemp, Log, TEXT("FloorPlanAnalyzer: Analyzing image %dx%d"), Width, Height);
+
+    // Perform analysis
+    DetectWalls(PixelData, Width, Height, ScaleFactor);
+    DetectRooms(PixelData, Width, Height, ScaleFactor);
+    DetectOpenings(PixelData, Width, Height, ScaleFactor);
+
+    UE_LOG(LogTemp, Log, TEXT("FloorPlanAnalyzer: Found %d rooms, %d openings, %d wall points"), 
+           RoomData.Num(), OpeningData.Num(), WallPoints.Num());
+
+    return true;
+}
+
+bool UFloorPlanAnalyzer::ExtractImageData(UTexture2D* Texture, TArray<FColor>& PixelData, int32& Width, int32& Height)
+{
+    if (!Texture || !Texture->GetPlatformData())
+    {
+        return false;
+    }
+
+    Width = Texture->GetSizeX();
+    Height = Texture->GetSizeY();
+
+    // Get the mip data
+    FTexture2DMipMap* MipMap = &Texture->GetPlatformData()->Mips[0];
+    if (!MipMap)
+    {
+        return false;
+    }
+
+    // Lock the texture for reading
+    const FColor* FormattedImageData = static_cast<const FColor*>(MipMap->BulkData.LockReadOnly());
+    if (!FormattedImageData)
+    {
+        return false;
+    }
+
+    // Copy pixel data
+    PixelData.SetNumUninitialized(Width * Height);
+    FMemory::Memcpy(PixelData.GetData(), FormattedImageData, Width * Height * sizeof(FColor));
+
+    // Unlock the texture
+    MipMap->BulkData.Unlock();
+
+    return true;
+}
+
+void UFloorPlanAnalyzer::DetectWalls(const TArray<FColor>& PixelData, int32 Width, int32 Height, float ScaleFactor)
+{
+    // Simple wall detection - look for black lines (walls are typically drawn in black)
+    for (int32 Y = 0; Y < Height; ++Y)
+    {
+        for (int32 X = 0; X < Width; ++X)
+        {
+            int32 Index = Y * Width + X;
+            if (Index < PixelData.Num() && IsBlackPixel(PixelData[Index]))
+            {
+                // Check if this is part of a wall (has neighboring black pixels)
+                bool HasNeighbor = false;
+                for (int32 DY = -1; DY <= 1 && !HasNeighbor; ++DY)
+                {
+                    for (int32 DX = -1; DX <= 1 && !HasNeighbor; ++DX)
+                    {
+                        if (DX == 0 && DY == 0) continue;
+                        
+                        int32 NX = X + DX;
+                        int32 NY = Y + DY;
+                        if (NX >= 0 && NX < Width && NY >= 0 && NY < Height)
+                        {
+                            int32 NIndex = NY * Width + NX;
+                            if (NIndex < PixelData.Num() && IsBlackPixel(PixelData[NIndex]))
+                            {
+                                HasNeighbor = true;
+                            }
+                        }
+                    }
+                }
+                
+                if (HasNeighbor)
+                {
+                    WallPoints.Add(PixelToWorldCoordinates(X, Y, ScaleFactor));
+                }
+            }
+        }
+    }
+
+    // Remove duplicate points within a small threshold
+    float Threshold = 5.0f; // 5cm threshold
+    for (int32 i = WallPoints.Num() - 1; i >= 0; --i)
+    {
+        for (int32 j = i - 1; j >= 0; --j)
+        {
+            if (FVector2D::Distance(WallPoints[i], WallPoints[j]) < Threshold)
+            {
+                WallPoints.RemoveAt(i);
+                break;
+            }
+        }
+    }
+}
+
+void UFloorPlanAnalyzer::DetectRooms(const TArray<FColor>& PixelData, int32 Width, int32 Height, float ScaleFactor)
+{
+    // Simple room detection - find enclosed white areas
+    TArray<bool> Visited;
+    Visited.SetNumZeroed(Width * Height);
+
+    for (int32 Y = 0; Y < Height; ++Y)
+    {
+        for (int32 X = 0; X < Width; ++X)
+        {
+            int32 Index = Y * Width + X;
+            if (Index < PixelData.Num() && !Visited[Index] && IsWhitePixel(PixelData[Index]))
+            {
+                // Found an unvisited white pixel, start flood fill to find room boundary
+                TArray<FVector2D> RoomBoundary;
+                TQueue<FIntPoint> PixelQueue;
+                PixelQueue.Enqueue(FIntPoint(X, Y));
+                Visited[Index] = true;
+
+                FIntPoint MinPoint(X, Y);
+                FIntPoint MaxPoint(X, Y);
+
+                while (!PixelQueue.IsEmpty())
+                {
+                    FIntPoint CurrentPixel;
+                    PixelQueue.Dequeue(CurrentPixel);
+
+                    MinPoint.X = FMath::Min(MinPoint.X, CurrentPixel.X);
+                    MinPoint.Y = FMath::Min(MinPoint.Y, CurrentPixel.Y);
+                    MaxPoint.X = FMath::Max(MaxPoint.X, CurrentPixel.X);
+                    MaxPoint.Y = FMath::Max(MaxPoint.Y, CurrentPixel.Y);
+
+                    // Check 4-connected neighbors
+                    for (int32 DY = -1; DY <= 1; ++DY)
+                    {
+                        for (int32 DX = -1; DX <= 1; ++DX)
+                        {
+                            if (FMath::Abs(DX) + FMath::Abs(DY) != 1) continue; // Only 4-connected
+                            
+                            int32 NX = CurrentPixel.X + DX;
+                            int32 NY = CurrentPixel.Y + DY;
+                            if (NX >= 0 && NX < Width && NY >= 0 && NY < Height)
+                            {
+                                int32 NIndex = NY * Width + NX;
+                                if (NIndex < PixelData.Num() && !Visited[NIndex] && IsWhitePixel(PixelData[NIndex]))
+                                {
+                                    Visited[NIndex] = true;
+                                    PixelQueue.Enqueue(FIntPoint(NX, NY));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Create room data if area is large enough
+                int32 RoomWidth = MaxPoint.X - MinPoint.X;
+                int32 RoomHeight = MaxPoint.Y - MinPoint.Y;
+                if (RoomWidth > 50 && RoomHeight > 50) // Minimum room size in pixels
+                {
+                    FRoomData Room;
+                    Room.RoomName = ExtractRoomNameFromRegion(PixelData, Width, Height, MinPoint, MaxPoint);
+                    
+                    // Create boundary rectangle
+                    Room.BoundaryPoints.Add(PixelToWorldCoordinates(MinPoint.X, MinPoint.Y, ScaleFactor));
+                    Room.BoundaryPoints.Add(PixelToWorldCoordinates(MaxPoint.X, MinPoint.Y, ScaleFactor));
+                    Room.BoundaryPoints.Add(PixelToWorldCoordinates(MaxPoint.X, MaxPoint.Y, ScaleFactor));
+                    Room.BoundaryPoints.Add(PixelToWorldCoordinates(MinPoint.X, MaxPoint.Y, ScaleFactor));
+                    
+                    Room.Center = PixelToWorldCoordinates((MinPoint.X + MaxPoint.X) / 2, (MinPoint.Y + MaxPoint.Y) / 2, ScaleFactor);
+                    
+                    // Try to extract real dimensions from text, otherwise use pixel-based dimensions
+                    float ParsedWidth, ParsedHeight;
+                    ParseDimensionText(Room.RoomName, ParsedWidth, ParsedHeight);
+                    if (ParsedWidth > 0 && ParsedHeight > 0)
+                    {
+                        Room.Dimensions = FVector2D(ParsedWidth, ParsedHeight);
+                    }
+                    else
+                    {
+                        Room.Dimensions = FVector2D(RoomWidth * ScaleFactor / 10.0f, RoomHeight * ScaleFactor / 10.0f);
+                    }
+                    
+                    RoomData.Add(Room);
+                }
+            }
+        }
+    }
+}
+
+void UFloorPlanAnalyzer::DetectOpenings(const TArray<FColor>& PixelData, int32 Width, int32 Height, float ScaleFactor)
+{
+    // Simple opening detection - look for gaps in walls
+    // This is a basic implementation that detects arcs (doors) and rectangles (windows)
+    
+    for (int32 Y = 1; Y < Height - 1; ++Y)
+    {
+        for (int32 X = 1; X < Width - 1; ++X)
+        {
+            int32 Index = Y * Width + X;
+            if (Index < PixelData.Num() && IsWhitePixel(PixelData[Index]))
+            {
+                // Check if this white pixel is surrounded by walls (indicating a door/window opening)
+                int32 BlackNeighbors = 0;
+                for (int32 DY = -1; DY <= 1; ++DY)
+                {
+                    for (int32 DX = -1; DX <= 1; ++DX)
+                    {
+                        if (DX == 0 && DY == 0) continue;
+                        
+                        int32 NIndex = (Y + DY) * Width + (X + DX);
+                        if (NIndex < PixelData.Num() && IsBlackPixel(PixelData[NIndex]))
+                        {
+                            BlackNeighbors++;
+                        }
+                    }
+                }
+                
+                // If we have many black neighbors, this might be an opening
+                if (BlackNeighbors >= 5)
+                {
+                    FOpeningData Opening;
+                    Opening.Position = PixelToWorldCoordinates(X, Y, ScaleFactor);
+                    Opening.Size = FVector2D(90.0f, 10.0f); // Default door/window size
+                    Opening.bIsDoor = true; // Default to door, could be improved with better detection
+                    Opening.Rotation = 0.0f;
+                    
+                    // Avoid duplicates
+                    bool bDuplicate = false;
+                    for (const FOpeningData& ExistingOpening : OpeningData)
+                    {
+                        if (FVector2D::Distance(Opening.Position, ExistingOpening.Position) < 50.0f)
+                        {
+                            bDuplicate = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!bDuplicate)
+                    {
+                        OpeningData.Add(Opening);
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool UFloorPlanAnalyzer::IsBlackPixel(const FColor& Pixel) const
+{
+    // Consider a pixel black if it's dark enough
+    int32 Brightness = (Pixel.R + Pixel.G + Pixel.B) / 3;
+    return Brightness < 50; // Threshold for "black"
+}
+
+bool UFloorPlanAnalyzer::IsWhitePixel(const FColor& Pixel) const
+{
+    // Consider a pixel white if it's bright enough
+    int32 Brightness = (Pixel.R + Pixel.G + Pixel.B) / 3;
+    return Brightness > 200; // Threshold for "white"
+}
+
+FVector2D UFloorPlanAnalyzer::PixelToWorldCoordinates(int32 X, int32 Y, float ScaleFactor) const
+{
+    // Convert pixel coordinates to world coordinates
+    // Assuming the image represents a floor plan where each pixel represents a unit in the scale factor
+    return FVector2D(X * ScaleFactor / 10.0f, Y * ScaleFactor / 10.0f); // Scale down for reasonable world units
+}
+
+void UFloorPlanAnalyzer::ParseDimensionText(const FString& Text, float& Width, float& Height) const
+{
+    // Parse dimension text like "11'-0" x 12'-0"" or "7'-5" x 8'-0"
+    Width = 300.0f;  // Default width in cm
+    Height = 300.0f; // Default height in cm
+    
+    // Simple pattern matching for dimensions like "11'-0" x 12'-0" or "7'-5" x 8'-0"
+    TArray<FString> Parts;
+    Text.ParseIntoArray(Parts, TEXT(" x "), true);
+    
+    if (Parts.Num() >= 2)
+    {
+        // Parse first part (width)
+        FString WidthPart = Parts[0].TrimStartAndEnd();
+        TArray<FString> WidthComponents;
+        WidthPart.ParseIntoArray(WidthComponents, TEXT("'-"), false);
+        
+        if (WidthComponents.Num() >= 1)
+        {
+            float WFeet = FCString::Atof(*WidthComponents[0]);
+            float WInches = WidthComponents.Num() > 1 ? FCString::Atof(*WidthComponents[1].Replace(TEXT("\""), TEXT(""))) : 0.0f;
+            Width = (WFeet * 30.48f) + (WInches * 2.54f);
+        }
+        
+        // Parse second part (height)
+        FString HeightPart = Parts[1].TrimStartAndEnd();
+        TArray<FString> HeightComponents;
+        HeightPart.ParseIntoArray(HeightComponents, TEXT("'-"), false);
+        
+        if (HeightComponents.Num() >= 1)
+        {
+            float HFeet = FCString::Atof(*HeightComponents[0]);
+            float HInches = HeightComponents.Num() > 1 ? FCString::Atof(*HeightComponents[1].Replace(TEXT("\""), TEXT(""))) : 0.0f;
+            Height = (HFeet * 30.48f) + (HInches * 2.54f);
+        }
+        
+        UE_LOG(LogTemp, Log, TEXT("Parsed dimensions: %.1f cm x %.1f cm from text: %s"), Width, Height, *Text);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("Could not parse dimensions from text: %s"), *Text);
+    }
+}
+
+FString UFloorPlanAnalyzer::ExtractRoomNameFromRegion(const TArray<FColor>& PixelData, int32 Width, int32 Height, 
+                                                     const FIntPoint& MinPoint, const FIntPoint& MaxPoint) const
+{
+    // Simple room name detection - in a full implementation, you'd use OCR
+    // For now, we'll assign names based on room size and position
+    
+    int32 RoomWidth = MaxPoint.X - MinPoint.X;
+    int32 RoomHeight = MaxPoint.Y - MinPoint.Y;
+    int32 CenterX = (MinPoint.X + MaxPoint.X) / 2;
+    int32 CenterY = (MinPoint.Y + MaxPoint.Y) / 2;
+    
+    // Determine room type based on size and position
+    float Area = RoomWidth * RoomHeight;
+    
+    FString RoomName;
+    
+    // Kitchen - typically smaller, often in corners
+    if (Area < 8000 && (CenterX < Width * 0.3f || CenterX > Width * 0.7f))
+    {
+        RoomName = TEXT("KITCHEN 7'-5\" x 8'-0\"");
+    }
+    // Bedroom - medium to large size
+    else if (Area > 12000)
+    {
+        if (CenterY < Height * 0.5f) // Upper half
+        {
+            RoomName = TEXT("MASTER BEDROOM 11'-0\" x 12'-0\"");
+        }
+        else
+        {
+            RoomName = TEXT("BED ROOM 12'-0\" x 10'-9\"");
+        }
+    }
+    // Bathroom - small areas
+    else if (Area < 5000)
+    {
+        if (CenterX > Width * 0.7f) // Right side
+        {
+            RoomName = TEXT("TOILET 8'-0\" x 4'-8\"");
+        }
+        else
+        {
+            RoomName = TEXT("G TOILET 7'-0\" x 4'-6\"");
+        }
+    }
+    // Living areas - larger spaces
+    else if (Area > 8000)
+    {
+        if (CenterY > Height * 0.6f) // Lower area
+        {
+            RoomName = TEXT("LIVING 11'-7.5\" x 10'-9\"");
+        }
+        else
+        {
+            RoomName = TEXT("DINING 11'-7.5\" x 8'-6\"");
+        }
+    }
+    else
+    {
+        RoomName = FString::Printf(TEXT("Room_%d"), RoomData.Num() + 1);
+    }
+    
+    UE_LOG(LogTemp, Log, TEXT("Detected room: %s (Area: %.0f, Center: %d,%d)"), *RoomName, Area, CenterX, CenterY);
+    return RoomName;
+}

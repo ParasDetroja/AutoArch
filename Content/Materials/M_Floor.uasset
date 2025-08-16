@@ -1,0 +1,9 @@
+This is a binary file that would contain the Floor Material asset.
+The material would have:
+- Base color: Medium brown wood tone (#8B4513) or concrete gray (#808080)
+- Roughness: 0.6 (moderately rough)
+- Metallic: 0.0 (non-metallic)
+- Normal map for surface detail (wood grain or concrete texture)
+- Specular: 0.5 (moderate reflection)
+- Tiling parameters for texture repetition
+- Support for different floor types (wood, tile, carpet, concrete)

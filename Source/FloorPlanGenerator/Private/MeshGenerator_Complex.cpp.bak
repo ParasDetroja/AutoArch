@@ -1,0 +1,363 @@
+#include "MeshGenerator.h"
+#include "Engine/StaticMesh.h"
+#include "StaticMeshAttributes.h"
+#include "MeshDescription.h"
+#include "StaticMeshOperations.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "UObject/Package.h"
+
+UMeshGenerator::UMeshGenerator()
+{
+    MeshCounter = 0;
+}
+
+UStaticMesh* UMeshGenerator::GenerateWallMesh(const FVector2D& StartPoint, const FVector2D& EndPoint, 
+                                              float Height, float Thickness, 
+                                              const TArray<FOpeningData>& Openings,
+                                              float DoorHeight, float WindowHeight)
+{
+    TArray<FVector> Vertices;
+    TArray<int32> Triangles;
+    TArray<FVector2D> UVs;
+
+    FVector WallStart = To3D(StartPoint, 0.0f);
+    FVector WallEnd = To3D(EndPoint, 0.0f);
+
+    CreateWallWithOpenings(Vertices, Triangles, UVs, WallStart, WallEnd, Height, Thickness, 
+                          Openings, DoorHeight, WindowHeight);
+
+    FString MeshName = FString::Printf(TEXT("GeneratedWall_%d"), ++MeshCounter);
+    return CreateStaticMeshFromData(Vertices, Triangles, UVs, MeshName);
+}
+
+UStaticMesh* UMeshGenerator::GenerateFloorMesh(const TArray<FVector2D>& BoundaryPoints, float ZHeight)
+{
+    if (BoundaryPoints.Num() < 3)
+    {
+        UE_LOG(LogTemp, Error, TEXT("MeshGenerator: Not enough boundary points for floor mesh"));
+        return nullptr;
+    }
+
+    TArray<FVector> Vertices;
+    TArray<int32> Triangles;
+    TArray<FVector2D> UVs;
+
+    // Convert 2D boundary points to 3D
+    TArray<FVector> BoundaryPoints3D;
+    for (const FVector2D& Point : BoundaryPoints)
+    {
+        BoundaryPoints3D.Add(To3D(Point, ZHeight));
+    }
+
+    CreatePlaneMesh(Vertices, Triangles, UVs, BoundaryPoints3D);
+
+    FString MeshName = FString::Printf(TEXT("GeneratedFloor_%d"), ++MeshCounter);
+    return CreateStaticMeshFromData(Vertices, Triangles, UVs, MeshName);
+}
+
+UStaticMesh* UMeshGenerator::GenerateCeilingMesh(const TArray<FVector2D>& BoundaryPoints, float ZHeight)
+{
+    // Ceiling is the same as floor but at different height
+    return GenerateFloorMesh(BoundaryPoints, ZHeight);
+}
+
+void UMeshGenerator::CreateBoxMesh(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                   const FVector& Center, const FVector& Extent)
+{
+    int32 StartIndex = Vertices.Num();
+
+    // Create box vertices
+    FVector BoxVertices[8] = {
+        Center + FVector(-Extent.X, -Extent.Y, -Extent.Z), // 0: Bottom-left-back
+        Center + FVector( Extent.X, -Extent.Y, -Extent.Z), // 1: Bottom-right-back
+        Center + FVector( Extent.X,  Extent.Y, -Extent.Z), // 2: Bottom-right-front
+        Center + FVector(-Extent.X,  Extent.Y, -Extent.Z), // 3: Bottom-left-front
+        Center + FVector(-Extent.X, -Extent.Y,  Extent.Z), // 4: Top-left-back
+        Center + FVector( Extent.X, -Extent.Y,  Extent.Z), // 5: Top-right-back
+        Center + FVector( Extent.X,  Extent.Y,  Extent.Z), // 6: Top-right-front
+        Center + FVector(-Extent.X,  Extent.Y,  Extent.Z)  // 7: Top-left-front
+    };
+
+    // Add vertices
+    for (int32 i = 0; i < 8; ++i)
+    {
+        Vertices.Add(BoxVertices[i]);
+    }
+
+    // Add UVs (simple mapping)
+    for (int32 i = 0; i < 8; ++i)
+    {
+        UVs.Add(FVector2D((i % 2) * 1.0f, (i / 2 % 2) * 1.0f));
+    }
+
+    // Define triangles for each face
+    int32 BoxTriangles[36] = {
+        // Bottom face (Y up)
+        0, 2, 1,  0, 3, 2,
+        // Top face
+        4, 5, 6,  4, 6, 7,
+        // Front face
+        3, 7, 6,  3, 6, 2,
+        // Back face
+        0, 1, 5,  0, 5, 4,
+        // Left face
+        0, 4, 7,  0, 7, 3,
+        // Right face
+        1, 2, 6,  1, 6, 5
+    };
+
+    // Add triangles with offset
+    for (int32 i = 0; i < 36; ++i)
+    {
+        Triangles.Add(StartIndex + BoxTriangles[i]);
+    }
+}
+
+void UMeshGenerator::CreatePlaneMesh(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                    const TArray<FVector>& BoundaryPoints)
+{
+    if (BoundaryPoints.Num() < 3)
+    {
+        return;
+    }
+
+    int32 StartIndex = Vertices.Num();
+
+    // Add boundary vertices
+    for (const FVector& Point : BoundaryPoints)
+    {
+        Vertices.Add(Point);
+    }
+
+    // Simple triangulation for convex polygons
+    for (int32 i = 1; i < BoundaryPoints.Num() - 1; ++i)
+    {
+        Triangles.Add(StartIndex);
+        Triangles.Add(StartIndex + i);
+        Triangles.Add(StartIndex + i + 1);
+    }
+
+    // Add UVs
+    for (int32 i = 0; i < BoundaryPoints.Num(); ++i)
+    {
+        // Simple UV mapping based on position
+        const FVector& Point = BoundaryPoints[i];
+        UVs.Add(FVector2D(Point.X * 0.01f, Point.Y * 0.01f)); // Scale down for UV
+    }
+}
+
+void UMeshGenerator::CreateWallWithOpenings(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                           const FVector& WallStart, const FVector& WallEnd, float Height, float Thickness,
+                                           const TArray<FOpeningData>& Openings, float DoorHeight, float WindowHeight)
+{
+    FVector WallDirection = (WallEnd - WallStart).GetSafeNormal();
+    FVector WallNormal = FVector::CrossProduct(WallDirection, FVector::UpVector).GetSafeNormal();
+    float WallLength = FVector::Distance(WallStart, WallEnd);
+
+    if (Openings.Num() == 0)
+    {
+        // Simple wall without openings
+        FVector WallCenter = (WallStart + WallEnd) * 0.5f + FVector(0, 0, Height * 0.5f);
+        FVector WallExtent = FVector(WallLength * 0.5f, Thickness * 0.5f, Height * 0.5f);
+        CreateBoxMesh(Vertices, Triangles, UVs, WallCenter, WallExtent);
+    }
+    else
+    {
+        // Create wall segments with proper openings
+        CreateWallSegmentsWithOpenings(Vertices, Triangles, UVs, WallStart, WallEnd, Height, Thickness, Openings, DoorHeight, WindowHeight);
+    }
+}
+
+void UMeshGenerator::CreateWallSegmentsWithOpenings(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                                    const FVector& WallStart, const FVector& WallEnd, float Height, float Thickness,
+                                                    const TArray<FOpeningData>& Openings, float DoorHeight, float WindowHeight)
+{
+    FVector WallDirection = (WallEnd - WallStart).GetSafeNormal();
+    FVector WallNormal = FVector::CrossProduct(WallDirection, FVector::UpVector).GetSafeNormal();
+    float WallLength = FVector::Distance(WallStart, WallEnd);
+    
+    // Sort openings by position along the wall
+    TArray<FOpeningData> SortedOpenings = Openings;
+    SortedOpenings.Sort([&](const FOpeningData& A, const FOpeningData& B) {
+        FVector ProjectedA = FVector::PointPlaneProject(To3D(A.Position), WallStart, WallDirection);
+        FVector ProjectedB = FVector::PointPlaneProject(To3D(B.Position), WallStart, WallDirection);
+        float DistA = FVector::Distance(WallStart, ProjectedA);
+        float DistB = FVector::Distance(WallStart, ProjectedB);
+        return DistA < DistB;
+    });
+    
+    float CurrentPos = 0.0f;
+    
+    for (const FOpeningData& Opening : SortedOpenings)
+    {
+        // Calculate opening position along wall
+        FVector ProjectedOpening = FVector::PointPlaneProject(To3D(Opening.Position), WallStart, WallDirection);
+        float OpeningPos = FVector::Distance(WallStart, ProjectedOpening);
+        float OpeningWidth = Opening.Size.X;
+        float OpeningStart = OpeningPos - OpeningWidth * 0.5f;
+        float OpeningEnd = OpeningPos + OpeningWidth * 0.5f;
+        
+        // Create wall segment before opening
+        if (OpeningStart > CurrentPos)
+        {
+            CreateWallSegment(Vertices, Triangles, UVs, WallStart, WallDirection, WallNormal, 
+                             CurrentPos, OpeningStart, Height, Thickness);
+        }
+        
+        // Create wall segments around opening (top/bottom for windows, top only for doors)
+        float OpeningHeight = Opening.bIsDoor ? DoorHeight : WindowHeight;
+        
+        if (Opening.bIsDoor)
+        {
+            // Door: wall pack from top side only
+            if (Height > DoorHeight)
+            {
+                CreateWallSegment(Vertices, Triangles, UVs, WallStart, WallDirection, WallNormal,
+                                 OpeningStart, OpeningEnd, Height, Thickness, DoorHeight, Height);
+            }
+        }
+        else
+        {
+            // Window: wall pack from both top and bottom sides
+            float WindowBottom = (Height - WindowHeight) * 0.5f;
+            float WindowTop = WindowBottom + WindowHeight;
+            
+            // Bottom wall segment
+            if (WindowBottom > 0)
+            {
+                CreateWallSegment(Vertices, Triangles, UVs, WallStart, WallDirection, WallNormal,
+                                 OpeningStart, OpeningEnd, WindowBottom, Thickness);
+            }
+            
+            // Top wall segment
+            if (WindowTop < Height)
+            {
+                CreateWallSegment(Vertices, Triangles, UVs, WallStart, WallDirection, WallNormal,
+                                 OpeningStart, OpeningEnd, Height, Thickness, WindowTop, Height);
+            }
+        }
+        
+        CurrentPos = OpeningEnd;
+    }
+    
+    // Create final wall segment after last opening
+    if (CurrentPos < WallLength)
+    {
+        CreateWallSegment(Vertices, Triangles, UVs, WallStart, WallDirection, WallNormal,
+                         CurrentPos, WallLength, Height, Thickness);
+    }
+}
+
+void UMeshGenerator::CreateWallSegment(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                      const FVector& WallStart, const FVector& WallDirection, const FVector& WallNormal,
+                                      float StartPos, float EndPos, float Height, float Thickness,
+                                      float ZStart, float ZEnd)
+{
+    if (StartPos >= EndPos || Height <= 0)
+        return;
+    
+    // Handle default parameter for ZEnd
+    if (ZEnd < 0)
+        ZEnd = Height;
+        
+    float SegmentLength = EndPos - StartPos;
+    FVector SegmentStart = WallStart + WallDirection * StartPos;
+    FVector SegmentEnd = WallStart + WallDirection * EndPos;
+    
+    FVector WallExtent = FVector(SegmentLength * 0.5f, Thickness * 0.5f, (ZEnd - ZStart) * 0.5f);
+    FVector SegmentCenter = (SegmentStart + SegmentEnd) * 0.5f + FVector(0, 0, ZStart + (ZEnd - ZStart) * 0.5f);
+    
+    CreateBoxMesh(Vertices, Triangles, UVs, SegmentCenter, WallExtent);
+}
+
+UStaticMesh* UMeshGenerator::CreateStaticMeshFromData(const TArray<FVector>& Vertices, 
+                                                     const TArray<int32>& Triangles, 
+                                                     const TArray<FVector2D>& UVs,
+                                                     const FString& MeshName)
+{
+    if (Vertices.Num() == 0 || Triangles.Num() == 0)
+    {
+        UE_LOG(LogTemp, Error, TEXT("MeshGenerator: No vertices or triangles to create mesh"));
+        return nullptr;
+    }
+
+    // Create a new static mesh
+    UPackage* Package = CreatePackage(*FString::Printf(TEXT("/Game/GeneratedMeshes/%s"), *MeshName));
+    UStaticMesh* StaticMesh = NewObject<UStaticMesh>(Package, *MeshName, RF_Public | RF_Standalone);
+
+    // Create mesh description
+    FMeshDescription MeshDescription;
+    FStaticMeshAttributes Attributes(MeshDescription);
+    Attributes.Register();
+
+    // Create vertices
+    FVertexArray& VertexArray = MeshDescription.Vertices();
+    TArray<FVertexID> VertexIDs;
+    VertexIDs.Reserve(Vertices.Num());
+
+    for (const FVector& Vertex : Vertices)
+    {
+        VertexIDs.Add(VertexArray.Append());
+    }
+
+    // Create vertex instances
+    FVertexInstanceArray& VertexInstanceArray = MeshDescription.VertexInstances();
+    TVertexInstanceAttributesRef<FVector> VertexInstanceNormals = Attributes.GetVertexInstanceNormals();
+    TVertexInstanceAttributesRef<FVector2D> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
+
+    TArray<FVertexInstanceID> VertexInstanceIDs;
+    VertexInstanceIDs.Reserve(Vertices.Num());
+
+    for (int32 i = 0; i < Vertices.Num(); ++i)
+    {
+        FVertexInstanceID VertexInstanceID = VertexInstanceArray.Append(VertexIDs[i]);
+        VertexInstanceIDs.Add(VertexInstanceID);
+        
+        // Set normal (simple calculation)
+        FVector Normal = FVector::UpVector; // Default normal
+        VertexInstanceNormals[VertexInstanceID] = Normal;
+        
+        // Set UV
+        if (i < UVs.Num())
+        {
+            VertexInstanceUVs.Set(VertexInstanceID, 0, UVs[i]);
+        }
+        else
+        {
+            VertexInstanceUVs.Set(VertexInstanceID, 0, FVector2D::ZeroVector);
+        }
+    }
+
+    // Create triangles
+    FPolygonGroupArray& PolygonGroupArray = MeshDescription.PolygonGroups();
+    FPolygonGroupID PolygonGroupID = PolygonGroupArray.Append();
+
+    for (int32 i = 0; i < Triangles.Num(); i += 3)
+    {
+        if (i + 2 < Triangles.Num())
+        {
+            TArray<FVertexInstanceID> TriangleVertices;
+            TriangleVertices.Add(VertexInstanceIDs[Triangles[i]]);
+            TriangleVertices.Add(VertexInstanceIDs[Triangles[i + 1]]);
+            TriangleVertices.Add(VertexInstanceIDs[Triangles[i + 2]]);
+
+            MeshDescription.CreatePolygon(PolygonGroupID, TriangleVertices);
+        }
+    }
+
+    // Build the static mesh
+    TArray<const FMeshDescription*> MeshDescriptionPtrs;
+    MeshDescriptionPtrs.Emplace(&MeshDescription);
+    StaticMesh->BuildFromMeshDescriptions(MeshDescriptionPtrs);
+
+    // Mark package as dirty
+    Package->MarkPackageDirty();
+
+    // Register with asset registry
+    FAssetRegistryModule::AssetCreated(StaticMesh);
+
+    UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Created static mesh %s with %d vertices, %d triangles"), 
+           *MeshName, Vertices.Num(), Triangles.Num() / 3);
+
+    return StaticMesh;
+}

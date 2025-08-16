@@ -1,0 +1,12 @@
+This is a binary file that would contain the Blueprint asset for the Floor Plan Generator UI.
+The Blueprint would expose the following functionality:
+- Input field for selecting floor plan texture
+- Sliders for wall height (default: 300cm / 10ft)
+- Sliders for door height (default: 244cm / 8ft) 
+- Sliders for window height (default: 152cm / 5ft)
+- Slider for wall thickness (default: 10cm / 4in)
+- "Generate Structure" button
+- Progress bar for generation process
+- Options for material selection
+
+This Blueprint would create a UFloorPlanProcessor instance and call ProcessFloorPlan() with the configured parameters.

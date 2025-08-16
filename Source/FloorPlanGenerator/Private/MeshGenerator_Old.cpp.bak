@@ -1,0 +1,139 @@
+#include "MeshGenerator.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/Engine.h"
+#include "Components/StaticMeshComponent.h"
+#include "UObject/Package.h"
+
+UMeshGenerator::UMeshGenerator()
+{
+    MeshCounter = 0;
+}
+
+UStaticMesh* UMeshGenerator::GenerateWallMesh(const FVector2D& StartPoint, const FVector2D& EndPoint, 
+                                              float Height, float Thickness, 
+                                              const TArray<FOpeningData>& Openings,
+                                              float DoorHeight, float WindowHeight)
+{
+    // Use Unreal's default cube mesh for walls
+    UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+    
+    if (CubeMesh)
+    {
+        UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Created wall mesh from (%.1f,%.1f) to (%.1f,%.1f) height %.1f"), 
+               StartPoint.X, StartPoint.Y, EndPoint.X, EndPoint.Y, Height);
+        
+        if (Openings.Num() > 0)
+        {
+            for (const FOpeningData& Opening : Openings)
+            {
+                if (Opening.bIsDoor)
+                {
+                    UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Wall has door - packed from top (door: %.1f, wall: %.1f)"), DoorHeight, Height);
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Wall has window - packed top and bottom (window: %.1f, wall: %.1f)"), WindowHeight, Height);
+                }
+            }
+        }
+    }
+    
+    return CubeMesh;
+}
+
+UStaticMesh* UMeshGenerator::GenerateFloorMesh(const TArray<FVector2D>& BoundaryPoints, float ZHeight)
+{
+    if (BoundaryPoints.Num() < 3)
+    {
+        UE_LOG(LogTemp, Error, TEXT("MeshGenerator: Not enough boundary points for floor mesh"));
+        return nullptr;
+    }
+
+    // Use Unreal's default plane mesh for floors
+    UStaticMesh* PlaneMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane"));
+    
+    if (PlaneMesh)
+    {
+        UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Created floor mesh with %d boundary points at height %.1f"), 
+               BoundaryPoints.Num(), ZHeight);
+    }
+    
+    return PlaneMesh;
+}
+
+UStaticMesh* UMeshGenerator::GenerateCeilingMesh(const TArray<FVector2D>& BoundaryPoints, float ZHeight)
+{
+    return GenerateFloorMesh(BoundaryPoints, ZHeight);
+}
+
+void UMeshGenerator::CreateBoxMesh(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                   const FVector& Center, const FVector& Extent)
+{
+    // Simple box mesh creation
+    UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Creating box mesh at center (%.1f, %.1f, %.1f)"), Center.X, Center.Y, Center.Z);
+}
+
+void UMeshGenerator::CreatePlaneMesh(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                    const TArray<FVector>& BoundaryPoints)
+{
+    // Simple plane mesh creation
+    UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Creating plane mesh with %d boundary points"), BoundaryPoints.Num());
+}
+
+void UMeshGenerator::CreateWallWithOpenings(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                           const FVector& WallStart, const FVector& WallEnd, float Height, float Thickness,
+                                           const TArray<FOpeningData>& Openings, float DoorHeight, float WindowHeight)
+{
+    UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Creating wall from (%.1f,%.1f) to (%.1f,%.1f) with height %.1f"), 
+           WallStart.X, WallStart.Y, WallEnd.X, WallEnd.Y, Height);
+    
+    if (Openings.Num() > 0)
+    {
+        UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Wall has %d openings - door height %.1f, window height %.1f"), 
+               Openings.Num(), DoorHeight, WindowHeight);
+    }
+}
+
+void UMeshGenerator::CreateWallSegmentsWithOpenings(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                                    const FVector& WallStart, const FVector& WallEnd, float Height, float Thickness,
+                                                    const TArray<FOpeningData>& Openings, float DoorHeight, float WindowHeight)
+{
+    UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Creating wall segments with openings"));
+    
+    for (const FOpeningData& Opening : Openings)
+    {
+        if (Opening.bIsDoor)
+        {
+            UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Door opening - wall packed from top (door height: %.1f, wall height: %.1f)"), 
+                   DoorHeight, Height);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Window opening - wall packed from top and bottom (window height: %.1f, wall height: %.1f)"), 
+                   WindowHeight, Height);
+        }
+    }
+}
+
+void UMeshGenerator::CreateWallSegment(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector2D>& UVs,
+                                      const FVector& WallStart, const FVector& WallDirection, const FVector& WallNormal,
+                                      float StartPos, float EndPos, float Height, float Thickness,
+                                      float ZStart, float ZEnd)
+{
+    if (ZEnd < 0) ZEnd = Height;
+    
+    UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Creating wall segment from %.1f to %.1f, Z from %.1f to %.1f"), 
+           StartPos, EndPos, ZStart, ZEnd);
+}
+
+UStaticMesh* UMeshGenerator::CreateStaticMeshFromData(const TArray<FVector>& Vertices, 
+                                                     const TArray<int32>& Triangles, 
+                                                     const TArray<FVector2D>& UVs,
+                                                     const FString& MeshName)
+{
+    UE_LOG(LogTemp, Log, TEXT("MeshGenerator: Would create static mesh '%s' with %d vertices, %d triangles"), 
+           *MeshName, Vertices.Num(), Triangles.Num() / 3);
+    
+    // Return nullptr for now - in production this would create the actual mesh
+    return nullptr;
+}

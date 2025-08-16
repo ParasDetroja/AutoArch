@@ -1,0 +1,24 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "1.0",
+    "FriendlyName": "Floor Plan Generator",
+    "Description": "Automatically generates parametric 3D interior structures from floor plan images with configurable wall, window, and door heights",
+    "Category": "Procedural Generation",
+    "CreatedBy": "Floor Plan Generator Team",
+    "CreatedByURL": "",
+    "DocsURL": "",
+    "MarketplaceURL": "",
+    "SupportURL": "",
+    "CanContainContent": true,
+    "IsBetaVersion": false,
+    "IsExperimentalVersion": false,
+    "Installed": false,
+    "Modules": [
+        {
+            "Name": "FloorPlanGenerator",
+            "Type": "Runtime",
+            "LoadingPhase": "Default"
+        }
+    ]
+}
